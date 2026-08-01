@@ -367,6 +367,12 @@ const api={
   ticketList:()=>apiRequest("/tickets",{auth:true}),
   ticketGet:(id)=>apiRequest("/tickets/"+id,{auth:true}),
   ticketReply:(id,formData)=>apiRequest("/tickets/"+id+"/reply",{method:"POST",body:formData,auth:true,isMultipart:true}),
+  notifList:()=>apiRequest("/users/notifications",{auth:true}),
+  notifMarkRead:(id)=>apiRequest("/users/notifications/"+id+"/read",{method:"PUT",auth:true}),
+  contentList:(type)=>apiRequest("/users/content"+(type?("?type="+type):""),{auth:true}),
+  adsList:()=>apiRequest("/users/ads",{auth:true}),
+  adImpression:(id)=>apiRequest("/users/ads/"+id+"/impression",{method:"POST",auth:true}),
+  adClick:(id)=>apiRequest("/users/ads/"+id+"/click",{method:"POST",auth:true}),
   coachAnalytics:()=>apiRequest("/coach/analytics",{auth:true}),
 };
 
@@ -1098,7 +1104,16 @@ const state={
   ticketOverlay:null,
   ticketList:null,
   ticketCategory:null,
+  ticketPriority:"normal",
   ticketImage:null,
+  notifOverlay:false,
+  notifList:null,
+  notifFetched:false,
+  contentOverlay:false,
+  contentList:null,
+  contentFilter:"",
+  adsList:null,
+  adsFetched:false,
   ticketDetail:null,
   ticketReplyImage:null
 };
@@ -2355,10 +2370,24 @@ function programBlock(ptype,dayIdx,rulesText){
   return html;
 }
 
+const _adImpressionsTracked=new Set();
+function renderAdBanner(){
+  var ads=state.adsList;
+  if(!ads||!ads.length) return "";
+  var ad=ads[0];
+  if(!_adImpressionsTracked.has(ad.id)){
+    _adImpressionsTracked.add(ad.id);
+    api.adImpression(ad.id).catch(function(){});
+  }
+  return "<div data-action='ad-click' data-id='"+ad.id+"' data-link=\""+esc(ad.linkUrl||"")+"\" style='cursor:pointer;margin-bottom:12px;border-radius:14px;overflow:hidden;'>"+
+    "<img src='"+esc(ad.imageUrl)+"' style='width:100%;display:block;border-radius:14px;'>"+
+  "</div>";
+}
 function renderToday(){
   if(state.carryDecision){ return renderCarryModal(); }
   const idx=activeIndexOf("main");
-  let html='<div class="quote-strip" style="border-color:rgba(216,174,82,.3);"><span>💫</span><span>'+getDailyMotivation()+'</span></div>';
+  let html=renderAdBanner();
+  html+='<div class="quote-strip" style="border-color:rgba(216,174,82,.3);"><span>💫</span><span>'+getDailyMotivation()+'</span></div>';
   html+=programBlock("main",idx,RULES);
   html+='<button class="btn-outline" style="margin-top:12px;" data-action="go-home-today">🏠 امروز نمی‌تونم برم باشگاه، ورزش خانگی</button>';
   return html;
@@ -2765,12 +2794,99 @@ function renderStats(){
 
 /* ================= پروفایل (ویرایش مشخصات + بازسازی برنامه) ================= */
 /* ================= سیستم تیکت پشتیبانی ================= */
-var TICKET_CATEGORIES=["فنی","مالی و پرداخت","گزارش مربی","اشتراک VIP","سایر"];
+var TICKET_CATEGORIES=["مشکلات پرداخت","اشتراک VIP","مشکلات فنی","گزارش باگ","پیشنهادات","گزارش تخلف","حساب کاربری","مربیان","هوش مصنوعی","سایر موارد"];
+var TICKET_PRIORITIES=[{v:"normal",l:"عادی"},{v:"important",l:"مهم"},{v:"urgent",l:"فوری"}];
 var TICKET_STATUS_META={
-  open:{label:"باز",color:"var(--brass2)"},
+  "new":{label:"جدید",color:"var(--brass2)"},
+  in_review:{label:"در حال بررسی",color:"var(--brass2)"},
   answered:{label:"پاسخ داده‌شده",color:"var(--green2)"},
+  waiting_user:{label:"منتظر پاسخ شما",color:"var(--brass2)"},
   closed:{label:"بسته",color:"var(--muted)"}
 };
+// نوع فایل رو از روی mimeType تشخیص می‌ده و محدودیت حجم رو چک می‌کنه (باید با قوانین بک‌اند هماهنگ باشه)
+function classifyTicketAttachment(file){
+  var rules=[
+    {kind:"image",mimes:["image/png","image/jpeg","image/webp"],max:5*1024*1024,label:"عکس"},
+    {kind:"video",mimes:["video/mp4","video/webm","video/quicktime"],max:30*1024*1024,label:"ویدئو"},
+    {kind:"pdf",mimes:["application/pdf"],max:10*1024*1024,label:"PDF"}
+  ];
+  for(var i=0;i<rules.length;i++){
+    if(rules[i].mimes.indexOf(file.type)>-1){
+      if(file.size>rules[i].max){ alert("حجم "+rules[i].label+" نباید بیشتر از "+Math.round(rules[i].max/1024/1024)+" مگابایت باشه"); return null; }
+      return rules[i].kind;
+    }
+  }
+  alert("این فرمت فایل پشتیبانی نمی‌شه (فقط عکس، ویدئو یا PDF)");
+  return null;
+}
+function renderTicketAttachmentThumb(file,kind,previewUrl,onRemoveAction){
+  var inner;
+  if(kind==="video") inner="<video src='"+previewUrl+"' style='width:100%;height:100%;object-fit:cover;border-radius:8px;border:1px solid var(--border);'></video>";
+  else if(kind==="pdf") inner="<div style='width:100%;height:100%;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:22px;'>📄</div>";
+  else inner="<img src='"+previewUrl+"' style='width:100%;height:100%;object-fit:cover;border-radius:8px;border:1px solid var(--border);'>";
+  return "<div style='position:relative;width:80px;height:80px;margin-top:8px;'>"+inner+
+    "<button data-action='"+onRemoveAction+"' style='position:absolute;top:-6px;left:-6px;background:var(--ink2);color:#fff;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:20px;padding:0;'>✕</button>"+
+  "</div>";
+}
+const CONTENT_TYPE_META={article:{label:"مقاله",emoji:"📝"},news:{label:"خبر",emoji:"📰"},video:{label:"ویدئو",emoji:"🎬"},challenge:{label:"چالش",emoji:"🏆"}};
+function renderContentOverlay(){
+  var h="<div style='padding-top:10px;'>"+
+    '<button data-action="content-close" style="font-size:12px;color:var(--muted);margin-bottom:10px;">← بازگشت</button>'+
+    "<div style='font-weight:800;font-size:14px;margin-bottom:10px;'>📰 مقالات و اخبار</div>"+
+    "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;'>"+
+      "<button data-action='content-filter' data-type='' style='padding:6px 12px;border-radius:20px;font-size:11.5px;border:1.5px solid "+(!state.contentFilter?"var(--brass)":"var(--border)")+";background:"+(!state.contentFilter?"rgba(216,174,82,.12)":"rgba(255,255,255,.02)")+";'>همه</button>"+
+      Object.keys(CONTENT_TYPE_META).map(function(k){
+        var m=CONTENT_TYPE_META[k], active=state.contentFilter===k;
+        return "<button data-action='content-filter' data-type='"+k+"' style='padding:6px 12px;border-radius:20px;font-size:11.5px;border:1.5px solid "+(active?"var(--brass)":"var(--border)")+";background:"+(active?"rgba(216,174,82,.12)":"rgba(255,255,255,.02)")+";'>"+m.emoji+" "+m.label+"</button>";
+      }).join("")+
+    "</div>";
+  if(!state.contentList){
+    h+="<div style='text-align:center;padding:30px;'><div class='spinner'></div></div>";
+  }else{
+    var list=state.contentList;
+    if(state.contentFilter) list=list.filter(function(c){return c.type===state.contentFilter;});
+    if(!list.length){
+      h+="<div style='text-align:center;color:var(--muted);padding:20px;'>مطلبی پیدا نشد</div>";
+    }else{
+      list.forEach(function(c){
+        var meta=CONTENT_TYPE_META[c.type]||{label:c.type,emoji:"📄"};
+        var preview=(c.body||"").replace(/<[^>]*>/g,"").slice(0,140);
+        h+="<div class='panel' style='padding:14px;margin-bottom:10px;'>"+
+          (c.coverImageUrl?"<img src='"+esc(c.coverImageUrl)+"' style='width:100%;height:140px;object-fit:cover;border-radius:10px;margin-bottom:8px;'>":"")+
+          "<div style='font-size:10px;color:var(--brass2);margin-bottom:4px;'>"+meta.emoji+" "+meta.label+" · "+new Date(c.createdAt).toLocaleDateString("fa-IR")+"</div>"+
+          "<div style='font-weight:700;font-size:14px;margin-bottom:6px;'>"+esc(c.title)+"</div>"+
+          "<div style='font-size:12px;color:var(--muted);'>"+esc(preview)+(preview.length>=140?"...":"")+"</div>"+
+        "</div>";
+      });
+    }
+  }
+  h+="</div>";
+  return h;
+}
+function notifUnreadCount(){
+  if(!state.notifList) return 0;
+  return state.notifList.filter(function(n){return !n.read;}).length;
+}
+function renderNotifOverlay(){
+  var h="<div style='padding-top:10px;'>"+
+    '<button data-action="notif-close" style="font-size:12px;color:var(--muted);margin-bottom:10px;">← بازگشت</button>'+
+    "<div class='panel' style='padding:16px;'>"+
+      "<div style='font-weight:800;font-size:14px;margin-bottom:12px;'>🔔 اعلان‌ها</div>";
+  var list=state.notifList||[];
+  if(!list.length){
+    h+="<div style='text-align:center;color:var(--muted);padding:20px;'>اعلانی نداری</div>";
+  }else{
+    list.forEach(function(n){
+      h+="<div data-action='notif-mark-read' data-id='"+n.id+"' style='padding:10px;border-radius:10px;margin-bottom:8px;background:"+(n.read?"rgba(255,255,255,.02)":"rgba(216,174,82,.1)")+";border:1px solid "+(n.read?"var(--border)":"var(--brass)")+";'>"+
+        "<div style='font-weight:700;font-size:13px;'>"+(n.read?"":"🔵 ")+esc(n.title)+"</div>"+
+        "<div style='font-size:12px;color:var(--text);margin-top:4px;'>"+esc(n.message)+"</div>"+
+        "<div style='font-size:10px;color:var(--muted);margin-top:4px;'>"+new Date(n.createdAt).toLocaleDateString("fa-IR")+"</div>"+
+      "</div>";
+    });
+  }
+  h+="</div></div>";
+  return h;
+}
 function renderTicketOverlay(){
   if(state.ticketOverlay==="new")return renderTicketNewForm();
   if(state.ticketOverlay==="detail")return renderTicketDetailScreen();
@@ -2812,20 +2928,24 @@ function renderTicketNewForm(){
           return "<button data-action='ticket-pick-cat' data-cat='"+esc(c)+"' style='padding:7px 12px;border-radius:20px;font-size:11.5px;border:1.5px solid "+(active?"var(--brass)":"var(--border)")+";background:"+(active?"rgba(216,174,82,.12)":"rgba(255,255,255,.02)")+";color:"+(active?"var(--brass2)":"var(--text)")+";'>"+esc(c)+"</button>";
         }).join("")+
       "</div>"+
+      "<label class='flabel'>اولویت</label>"+
+      "<div style='display:flex;gap:6px;margin-top:4px;'>"+
+        TICKET_PRIORITIES.map(function(p){
+          var active=(state.ticketPriority||"normal")===p.v;
+          return "<button data-action='ticket-pick-priority' data-pr='"+p.v+"' style='flex:1;padding:8px 10px;border-radius:10px;font-size:11.5px;font-weight:700;border:1.5px solid "+(active?"var(--brass)":"var(--border)")+";background:"+(active?"rgba(216,174,82,.12)":"rgba(255,255,255,.02)")+";color:"+(active?"var(--brass2)":"var(--text)")+";'>"+p.l+"</button>";
+        }).join("")+
+      "</div>"+
       "<label class='flabel'>موضوع *</label>"+
       "<input class='stat-input-full' id='ticketSubject' placeholder='مثلاً مشکل در پرداخت اشتراک'>"+
       "<label class='flabel'>توضیح کامل *</label>"+
       "<textarea class='stat-input-full' id='ticketMessage' rows='4' style='resize:vertical;' placeholder='هرچی که لازمه بدونیم رو بنویس...'></textarea>"+
-      "<label class='flabel'>عکس (اختیاری)</label>"+
+      "<label class='flabel'>پیوست (اختیاری — عکس، ویدئو یا PDF)</label>"+
       "<label style='display:inline-block;cursor:pointer;background:rgba(255,255,255,.04);border:1.5px dashed var(--border);border-radius:10px;padding:12px;text-align:center;width:100%;box-sizing:border-box;margin-top:4px;'>"+
-        "📎 انتخاب عکس"+
-        "<input type='file' id='ticketImageInput' accept='image/png,image/jpeg,image/webp' style='display:none;'>"+
+        "📎 انتخاب فایل"+
+        "<input type='file' id='ticketImageInput' accept='image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime,application/pdf' style='display:none;'>"+
       "</label>";
   if(state.ticketImage){
-    h+="<div style='position:relative;width:80px;height:80px;margin-top:8px;'>"+
-      "<img src='"+state.ticketImage.previewUrl+"' style='width:100%;height:100%;object-fit:cover;border-radius:8px;border:1px solid var(--border);'>"+
-      "<button data-action='ticket-image-remove' style='position:absolute;top:-6px;left:-6px;background:var(--ink2);color:#fff;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:20px;padding:0;'>✕</button>"+
-    "</div>";
+    h+=renderTicketAttachmentThumb(state.ticketImage.file,state.ticketImage.kind,state.ticketImage.previewUrl,"ticket-image-remove");
   }
   h+='<button class="btn-full btn-brass" style="margin-top:12px;" data-action="ticket-submit" '+(state.ticketSubmitLoading?"disabled":"")+'>'+(state.ticketSubmitLoading?"⏳ در حال ارسال...":"🎫 ارسال تیکت")+'</button>'+
     "</div></div>";
@@ -2848,9 +2968,15 @@ function renderTicketDetailScreen(){
     "<div id='ticketMsgLog' style='display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;padding:4px;'>";
   msgs.forEach(function(m){
     var mine=m.senderRole==="user";
+    var atts=(m.attachments&&m.attachments.length)?m.attachments:(m.attachmentUrl?[{url:m.attachmentUrl,type:"image"}]:[]);
     h+="<div style='max-width:78%;align-self:"+(mine?"flex-end":"flex-start")+";background:"+(mine?"rgba(216,174,82,.14)":"rgba(255,255,255,.04)")+";border:1px solid "+(mine?"rgba(216,174,82,.3)":"var(--border)")+";border-radius:14px;padding:8px 10px;'>"+
       "<div style='font-size:9px;color:var(--muted);margin-bottom:3px;'>"+(mine?"شما":"👨‍💼 پشتیبانی")+"</div>"+
-      (m.attachmentUrl?"<img src='"+API_BASE_URL.replace('/api','')+esc(m.attachmentUrl)+"' style='max-width:100%;border-radius:8px;margin-bottom:4px;display:block;'>":"")+
+      atts.map(function(a){
+        var url=API_BASE_URL.replace('/api','')+esc(a.url);
+        if(a.type==="video")return "<video src='"+url+"' controls style='max-width:100%;border-radius:8px;margin-bottom:4px;display:block;'></video>";
+        if(a.type==="pdf")return "<a href='"+url+"' target='_blank' style='display:block;font-size:11.5px;color:var(--brass2);margin-bottom:4px;'>📄 دانلود فایل PDF</a>";
+        return "<img src='"+url+"' style='max-width:100%;border-radius:8px;margin-bottom:4px;display:block;'>";
+      }).join("")+
       (m.text?"<div style='font-size:12.5px;white-space:pre-wrap;'>"+esc(m.text)+"</div>":"")+
     "</div>";
   });
@@ -2861,7 +2987,7 @@ function renderTicketDetailScreen(){
     h+="<div class='section-gap'>"+
       (state.ticketReplyImage?"<div style='font-size:10.5px;color:var(--green2);margin-bottom:4px;'>📎 "+esc(state.ticketReplyImage.name)+"</div>":"")+
       "<div class='row' style='gap:6px;'>"+
-        "<label style='cursor:pointer;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;padding:10px 12px;'>📎<input type='file' id='ticketReplyInput' style='display:none;' accept='image/png,image/jpeg,image/webp'></label>"+
+        "<label style='cursor:pointer;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;padding:10px 12px;'>📎<input type='file' id='ticketReplyInput' style='display:none;' accept='image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime,application/pdf'></label>"+
         "<input class='stat-input-full' id='ticketReplyText' placeholder='پیامت رو بنویس...' style='flex:1;margin:0;'>"+
         '<button class="btn-brass" style="padding:10px 16px;flex-shrink:0;" data-action="ticket-reply-send" '+(state.ticketReplyLoading?"disabled":"")+'>'+(state.ticketReplyLoading?"⏳":"ارسال")+'</button>'+
       "</div>"+
@@ -2920,6 +3046,25 @@ function renderProfile(){
     '</div>'+
     '<button class="btn-full btn-brass" data-action="save-health">💾 ذخیره اطلاعات سلامت</button>'+
   '</div>';
+
+  html+='<div class="panel section-gap" style="padding:16px;">'+
+    '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">🎧 پشتیبانی</div>'+
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">سوال داری یا مشکلی پیش اومده؟ برامون تیکت بزن، با عکس هم می‌تونی توضیح بدی.</div>'+
+    '<button class="btn-full btn-brass" data-action="ticket-open-list">🎫 تیکت‌های پشتیبانی من</button>'+
+  '</div>';
+
+  html+='<div class="panel section-gap" style="padding:16px;">'+
+    '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">📰 مقالات و اخبار</div>'+
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">مطالب آموزشی، اخبار و چالش‌های تیم آیرون رو اینجا ببین.</div>'+
+    '<button class="btn-full" data-action="content-open">📚 مشاهدهٔ مطالب</button>'+
+  '</div>';
+
+  if(state.authUser){
+    html+='<div class="panel section-gap" style="padding:16px;text-align:center;">'+
+      '<button style="color:var(--ink2);font-size:13px;font-weight:700;" data-action="do-logout">🚪 خروج از حساب ('+esc(state.authUser.email||state.authUser.phone||"")+')</button>'+
+    '</div>';
+  }
+
   return html;
 }
 
@@ -3685,7 +3830,6 @@ function renderCoach(){
   let html='<div class="panel" style="padding:16px;">'+
     '<div class="row" style="justify-content:space-between;"><span class="row" style="gap:6px;"><span>🧠</span><span style="font-weight:800;font-size:15px;">گزارش پیشرفت '+esc(state.profile.name)+'</span></span>'+
     '<button style="font-size:11px;color:var(--brass);" data-action="edit-profile">⚙️ ویرایش پروفایل</button></div>'+
-    (state.authUser?'<div style="text-align:left;margin-top:4px;"><button style="font-size:11px;color:var(--ink2);" data-action="do-logout">🚪 خروج از حساب ('+esc(state.authUser.email||state.authUser.phone||"")+')</button></div>':'')+
     (!state.authUser && state.guestMode?'<div class="quote-strip" style="margin-top:10px;justify-content:space-between;"><span>👤 در حالت مهمانی — اطلاعاتت فقط روی همین گوشیه</span><button data-action="goto-upgrade" style="background:var(--brass);color:#1A140B;padding:6px 12px;border-radius:20px;font-weight:800;font-size:11px;">ساخت حساب</button></div>':'')+
     '<div class="hist-row"><span style="color:var(--muted);">روز</span><span class="mono">'+toFa(p.daysPassed)+'</span></div>'+
     '<div class="hist-row"><span style="color:var(--muted);">🔥 استریک فعلی</span><span class="mono" style="color:var(--brass2);font-weight:800;">'+toFa(streakVal)+' روز</span></div>'+
@@ -3904,7 +4048,7 @@ function renderCoach(){
       '<button data-action="del-last-chat" style="font-size:11px;color:var(--brass);border:1px solid rgba(216,174,82,.3);border-radius:6px;padding:6px 8px;" title="حذف آخرین">↩</button>'+
     '</div>';
   }
-  html+='<div class="row"><button class="plusbtn"<button class="plusbtn" data-action="pick-chat-photo" style="background:rgba(216,174,82,.15);color:var(--brass);font-size:18px;border:1px solid rgba(216,174,82,.4);" '+(state.chatTyping?"disabled":"")+' title="ارسال عکس">📷</button><input id="chatInput" class="stat-input-full" style="flex:1;width:auto;" placeholder="سوالت رو بنویس..." '+(state.chatTyping?"disabled":"")+' /><button class="plusbtn" data-action="chat-send" style="background:var(--green2);" '+(state.chatTyping?"disabled":"")+'>➤</button></div></div>';
+  html+='<div class="row"><button class="plusbtn" data-action="pick-chat-photo" style="background:rgba(216,174,82,.15);color:var(--brass);font-size:18px;border:1px solid rgba(216,174,82,.4);" '+(state.chatTyping?"disabled":"")+' title="ارسال عکس">📷</button><input id="chatInput" class="stat-input-full" style="flex:1;width:auto;" placeholder="سوالت رو بنویس..." '+(state.chatTyping?"disabled":"")+' /><button class="plusbtn" data-action="chat-send" style="background:var(--green2);" '+(state.chatTyping?"disabled":"")+'>➤</button></div></div>';
 
   html+='<div class="panel section-gap" style="padding:16px;">'+
     '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">📄 خروجی PDF برنامه</div>'+
@@ -3922,12 +4066,6 @@ function renderCoach(){
     '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">اطلاعاتت روی همین گوشی ذخیره‌ست. یه فایل پشتیبان بگیر تا اگه گوشی/مرورگر عوض شد، از دستش ندی.</div>'+
     '<button class="btn-full" data-action="export-backup">⬇️ دانلود پشتیبان</button>'+
     '<button class="btn-full btn-brass" style="margin-top:8px;" data-action="import-backup">⬆️ بازگردانی از فایل</button>'+
-  '</div>';
-
-  html+='<div class="panel section-gap" style="padding:16px;">'+
-    '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">🎫 پشتیبانی</div>'+
-    '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">سوال داری یا مشکلی پیش اومده؟ برامون تیکت بزن، با عکس هم می‌تونی توضیح بدی.</div>'+
-    '<button class="btn-full btn-brass" data-action="ticket-open-list">🎫 تیکت‌های پشتیبانی من</button>'+
   '</div>';
 
   html+='<div style="text-align:center;padding-top:10px;">'+
@@ -4834,8 +4972,18 @@ function renderApp(){
     return;
   }
   resolveCarry();
+  if(state.authUser && !state.notifFetched){
+    state.notifFetched=true;
+    api.notifList().then(function(r){ state.notifList=r; render(); }).catch(function(){});
+  }
+  if(state.authUser && !state.adsFetched){
+    state.adsFetched=true;
+    api.adsList().then(function(r){ state.adsList=r; render(); }).catch(function(){});
+  }
   let content="";
   if(state.carryDecision){ content=renderCarryModal(); }
+  else if(state.notifOverlay){ content=renderNotifOverlay(); }
+  else if(state.contentOverlay){ content=renderContentOverlay(); }
   else if(state.liveMode){ content=renderLiveMode(); }
   else if(state.ticketOverlay){ content=renderTicketOverlay(); }
   else if(state.tab==="today") content=renderToday();
@@ -4888,9 +5036,14 @@ function renderApp(){
           '<div style="font-size:14px;font-weight:700;">پروتکل آیرون <span style="color:var(--green2);">· '+esc(state.profile.name)+'</span></div>'+
         '</div>'+
       '</div>'+
-      '<div style="text-align:left;">'+
-        '<div style="font-size:11px;color:var(--muted);">امروز</div>'+
-        '<div class="mono" style="font-size:13px;font-weight:700;">'+WDAYS[weekdayIndex]+' '+toFa(jalaliDate[2])+' '+MONTHS[jalaliDate[1]-1]+'</div>'+
+      '<div style="display:flex;align-items:center;gap:10px;">'+
+        '<button data-action="notif-open" style="position:relative;background:none;border:none;font-size:20px;padding:4px;">🔔'+
+          (notifUnreadCount()>0?"<span style='position:absolute;top:-2px;left:-2px;background:var(--red,#FF5252);color:#fff;border-radius:50%;min-width:16px;height:16px;font-size:9px;line-height:16px;text-align:center;padding:0 3px;'>"+notifUnreadCount()+"</span>":"")+
+        '</button>'+
+        '<div style="text-align:left;">'+
+          '<div style="font-size:11px;color:var(--muted);">امروز</div>'+
+          '<div class="mono" style="font-size:13px;font-weight:700;">'+WDAYS[weekdayIndex]+' '+toFa(jalaliDate[2])+' '+MONTHS[jalaliDate[1]-1]+'</div>'+
+        '</div>'+
       '</div>'+
     '</div>'+
     '<div class="wrap">'+
@@ -4915,6 +5068,9 @@ function renderApp(){
         '<span style="font-size:20px;">'+t.emoji+'</span><span style="font-size:13px;font-weight:600;">'+t.label+'</span>'+
       '</button>';
     });
+    moreHtml+='<button class="tabbtn" data-action="open-support" style="flex-direction:row;justify-content:flex-start;gap:8px;padding:12px;border:1px solid var(--border);border-radius:10px;">'+
+        '<span style="font-size:20px;">🎧</span><span style="font-size:13px;font-weight:600;">پشتیبانی</span>'+
+      '</button>';
     moreHtml+='</div>'+
       '<button class="btn-outline" style="margin-top:10px;" data-action="close-more">بستن</button>'+
       '</div></div>';
@@ -5005,6 +5161,12 @@ document.addEventListener("click",function(e){
   if(action==="tab"){ state.tab=t.dataset.tab; state._moreMenu=false; state._coachProfileStatus=undefined; render(); }
   else if(action==="more-menu"){ state._moreMenu=true; render(); }
   else if(action==="close-more"){ state._moreMenu=false; render(); }
+  else if(action==="open-support"){
+    state._moreMenu=false;
+    if(!state.authUser){alert("اول وارد حساب شو");render();return;}
+    state.ticketOverlay="list"; render();
+    api.ticketList().then(function(r){state.ticketList=r;render();}).catch(function(){state.ticketList=[];render();});
+  }
   else if(action==="tab-close-more"){ state.tab=t.dataset.tab; state._moreMenu=false; state._coachProfileStatus=undefined; render(); }
   else if(action==="coach-refresh"){ state._coachProfileStatus=undefined; render(); }
   else if(action==="install-app"){ triggerInstall(); }
@@ -5514,10 +5676,35 @@ document.addEventListener("click",function(e){
     api.ticketList().then(function(r){state.ticketList=r;render();}).catch(function(){state.ticketList=[];render();});
   }
   else if(action==="ticket-close"){ state.ticketOverlay=null; render(); }
+  else if(action==="notif-open"){
+    state.notifOverlay=true; render();
+    api.notifList().then(function(r){state.notifList=r;render();}).catch(function(){});
+  }
+  else if(action==="notif-close"){ state.notifOverlay=false; render(); }
+  else if(action==="notif-mark-read"){
+    var nid=t.dataset.id;
+    var n=(state.notifList||[]).find(function(x){return x.id===nid;});
+    if(n&&!n.read){
+      n.read=true; render();
+      api.notifMarkRead(nid).catch(function(){});
+    }
+  }
+  else if(action==="content-open"){
+    state.contentOverlay=true; state.contentFilter=""; render();
+    api.contentList().then(function(r){state.contentList=r;render();}).catch(function(){state.contentList=[];render();});
+  }
+  else if(action==="content-close"){ state.contentOverlay=false; render(); }
+  else if(action==="content-filter"){ state.contentFilter=t.dataset.type||""; render(); }
+  else if(action==="ad-click"){
+    var adId=t.dataset.id, link=t.dataset.link;
+    api.adClick(adId).catch(function(){});
+    if(link) window.open(link,"_blank");
+  }
   else if(action==="ticket-open-new"){
-    state.ticketOverlay="new"; state.ticketCategory=null; state.ticketImage=null; render();
+    state.ticketOverlay="new"; state.ticketCategory=null; state.ticketPriority="normal"; state.ticketImage=null; render();
   }
   else if(action==="ticket-pick-cat"){ state.ticketCategory=t.dataset.cat; render(); }
+  else if(action==="ticket-pick-priority"){ state.ticketPriority=t.dataset.pr; render(); }
   else if(action==="ticket-image-remove"){ state.ticketImage=null; render(); }
   else if(action==="ticket-submit"){
     if(state.ticketSubmitLoading)return;
@@ -5526,12 +5713,12 @@ document.addEventListener("click",function(e){
     if(!subj){alert("موضوع رو بنویس");return;}
     if(!msg){alert("توضیح رو بنویس");return;}
     var fd2=new FormData();
-    fd2.append("subject",subj); fd2.append("message",msg); fd2.append("category",state.ticketCategory||"سایر");
+    fd2.append("subject",subj); fd2.append("message",msg); fd2.append("category",state.ticketCategory||"سایر موارد"); fd2.append("priority",state.ticketPriority||"normal");
     if(state.ticketImage) fd2.append("image0",state.ticketImage.file);
     state.ticketSubmitLoading=true; render();
     api.ticketCreate(fd2).then(function(){
       state.ticketSubmitLoading=false;
-      state.ticketOverlay="list"; state.ticketImage=null; state.ticketList=null; render();
+      state.ticketOverlay="list"; state.ticketImage=null; state.ticketPriority="normal"; state.ticketList=null; render();
       alert("تیکتت ثبت شد ✅");
       api.ticketList().then(function(r){state.ticketList=r;render();}).catch(function(){state.ticketList=[];render();});
     }).catch(function(e){state.ticketSubmitLoading=false; alert(e.message); render();});
@@ -5632,12 +5819,16 @@ document.addEventListener("change",function(e){
 document.addEventListener("change",function(e){
   if(e.target && e.target.id==="ticketImageInput" && e.target.files && e.target.files[0]){
     var f=e.target.files[0];
-    state.ticketImage={file:f,previewUrl:URL.createObjectURL(f),name:f.name};
+    var kind=classifyTicketAttachment(f);
+    if(!kind){ e.target.value=""; return; }
+    state.ticketImage={file:f,kind:kind,previewUrl:URL.createObjectURL(f),name:f.name};
     render();
   }
   if(e.target && e.target.id==="ticketReplyInput" && e.target.files && e.target.files[0]){
     var f2=e.target.files[0];
-    state.ticketReplyImage={file:f2,name:f2.name};
+    var kind2=classifyTicketAttachment(f2);
+    if(!kind2){ e.target.value=""; return; }
+    state.ticketReplyImage={file:f2,kind:kind2,name:f2.name};
     render();
   }
 });
